@@ -10,6 +10,8 @@ ESP01-S
 
 基于中移物联网平台 MQTT协议
 
+PubSubClient库来源于网络
+
 应用中命令下发字符串格式为：
 {"IO":0,"Value":{V}}
 或
