@@ -38,21 +38,24 @@ const char* mqtt_server = "183.230.40.39";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
-long lastMsg = 0;
-char msg_buf[21];
+
 int value_io0 = 0;
 int value_io2 = 0;
 
-char msgJson[] = "{\"IO0\":0,\"IO2\":0}";
+int reconnectWaitSec = 5;
+bool needfeedback = false;
 
-int i;
+bool _analyzeFail = false;
+char* _lastCreq;
+
+long lastMsg = 0;
+char ack_buf[1];
+char msg_buf[21];
 unsigned short json_len = 18;
 uint8_t* packet_p;
 
 StaticJsonDocument<200> doc;
-
-int reconnectWaitSec = 5;
-bool needfeedback = false;
+char msgJson[] = "{\"IO0\":0,\"IO2\":0}";
 
 void setup_wifi() {
   pinMode(IO0_PIN, OUTPUT);
@@ -77,6 +80,8 @@ void setup_wifi() {
   Serial.println("WiFi connected");
   Serial.println("IP address: ");
   Serial.println(WiFi.localIP());
+  delay(1000);
+  Serial.println("Running...");
 }
 
 void publishdata(char* topic, char* msg) {
@@ -91,6 +96,7 @@ void publishdata(char* topic, char* msg) {
   Serial.print(" : ");
   Serial.println(msg);
   client.publish(topic, msg_buf, 3 + strlen(msg), false); // msg_buf as payload length which may have a "0x00"byte
+  Serial.println("- - - - - OK.");
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
@@ -101,23 +107,28 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.print((char)payload[i]);
   }
   Serial.println();
-
-  if (topic[0] == '$' && topic[1] == 'c' && topic[2] == 'r' && topic[3] == 'e' && topic[4] == 'q' && topic[5] == '/') {
+  int topiclen = strlen(topic);
+  if (topiclen > 5 && topic[0] == '$' && topic[1] == 'c' && topic[2] == 'r' && topic[3] == 'e' && topic[4] == 'q' && topic[5] == '/') {
     needfeedback = true;
+    _lastCreq = new char[topiclen + 1];
+    for (int i = 0; i < topiclen; i++) {
+      _lastCreq[i] = topic[i];
+    }
+    _lastCreq[topiclen] = 0;
+  } else {
+    needfeedback = false;
   }
+
+  Serial.println("Analyze playload to Json...");
   // Deserialize the JSON document
   DeserializationError error = deserializeJson(doc, payload);
 
   // Test if parsing succeeds.
   if (error) {
-    Serial.print(F("deserializeJson() failed: "));
+    Serial.print(F("Analyze playload failed: "));
     Serial.println(error.c_str());
     if (needfeedback) {
-      char* ackstr = "Error";
-      topic[3] = 's';
-      topic[4] = 'p';
-	  //can not publish in callback ,will crash
-      // publishdata(topic, ackstr);
+      ack_buf[0] = '0';
     }
     return;
   }
@@ -125,6 +136,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   // Get the root object in the document
   JsonObject root = doc.as<JsonObject>();
 
+  Serial.println("Analyze Json...");
   // Fetch values.
   int io = root["IO"];
   int value = root["Value"];
@@ -140,13 +152,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.println(value_io2);
     digitalWrite(IO2_PIN, value_io2 == 1 ? HIGH : LOW);
   }
-  if (needfeedback) {
-    char ackstr[] = "Ok";
-    topic[3] = 's';
-    topic[4] = 'p';
-    // publishdata(topic, ackstr);
-  }
-
+  ack_buf[0] = '1';
+  Serial.println("Callback over.");
 }
 
 void reconnect() {
@@ -154,10 +161,10 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("device id", "product id", "key")) {
+     if (client.connect("device id", "product id", "key")) {
       Serial.println("connected");
       // ... and resubscribe
-      client.subscribe("DevCtrl");
+      //client.subscribe("DevCtrl");
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -191,8 +198,15 @@ void loop() {
   if (needfeedback || now - lastMsg > 5000) {
     if (needfeedback) {
       needfeedback = false;
+      _lastCreq[3] = 's';
+      _lastCreq[4] = 'p';
+      Serial.print("Publish Ack message to ");
+      Serial.print(_lastCreq);
+      Serial.print(" : ");
+      Serial.print(ack_buf);
+      client.publish(_lastCreq, ack_buf, 1, false);
+      Serial.println("   ...OK.");
     }
-    Serial.println("upload data point.");
     lastMsg = now;
     if (value_io0 == 0) {
       msgJson[7] = '0';
@@ -207,6 +221,5 @@ void loop() {
       msgJson[15] = '1';
     }
     publishdata("$dp", msgJson);
-    Serial.println("upload data point done.");
   }
 }
