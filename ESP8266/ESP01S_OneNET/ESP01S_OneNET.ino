@@ -1,15 +1,14 @@
 /*
-  Basic ESP8266 MQTT example
+  Basic ESP8266 MQTT example for OneNET
 
   This sketch demonstrates the capabilities of the pubsub library in combination
   with the ESP8266 board/library.
 
   It connects to an MQTT server then:
-  - publishes "hello world" to the topic "outTopic" every two seconds
-  - subscribes to the topic "inTopic", printing out any messages
+  - publishes "{\"IO0\":0,\"IO2\":0}" to the topic "$dp" every 60 seconds
+  - subscribes to the topic "$creq", printing out any messages
     it receives. NB - it assumes the received payloads are strings not binary
-  - If the first character of the topic "inTopic" is an 1, switch ON the ESP Led,
-    else switch it off
+  - If the playload of the topic "$creq/cmduuid" is valid, switch ON/OFF the ESP IO.
 
   It will reconnect to the server if the connection is lost using a blocking
   reconnect function. See the 'mqtt_reconnect_nonblocking' example for how to
@@ -22,66 +21,72 @@
   - Select your ESP8266 in "Tools -> Board"
 
 */
+
 #include <ESP8266WiFi.h>
 #include "PubSubClient.h"
 #include <ArduinoJson.h>
 
-//#define BUILTIN_LED 2
+//#define IO
 #define IO0_PIN 0
 #define IO2_PIN 2
 
-// Update these with values suitable for your network.
+// Update these with values suitable for your network and server.
 
-const char* ssid = "ssid";
-const char* password = "password";
+const char* ssid = "";
+const char* password = "";
+
 const char* mqtt_server = "183.230.40.39";
+const int mqtt_port = 6002;
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+const char* productid = "";
+const char* deviceid = "";
+const char* apikey = "";
 
+//data upload interval. ms
+const int uploadinterval = 60000;
+
+//max reconnect wait time. sec
+const int maxreconnectwaittime = 600;
+
+//status of IO
 int value_io0 = 0;
 int value_io2 = 0;
 
 int reconnectWaitSec = 5;
 bool needfeedback = false;
 
-bool _analyzeFail = false;
 char* _lastCreq;
-
 long lastMsg = 0;
+long lastDot = 0;
 char ack_buf[1];
 char msg_buf[21];
 unsigned short json_len = 18;
-uint8_t* packet_p;
-
-StaticJsonDocument<200> doc;
 char msgJson[] = "{\"IO0\":0,\"IO2\":0}";
 
-void setup_wifi() {
-  pinMode(IO0_PIN, OUTPUT);
-  pinMode(IO2_PIN, OUTPUT);
+StaticJsonDocument<200> doc;
+WiFiClient espClient;
+PubSubClient client(espClient);
 
-  delay(10);
+void setup_wifi() {
   // We start by connecting to a WiFi network
   Serial.println();
   Serial.print("Connecting to ");
   Serial.println(ssid);
 
   WiFi.begin(ssid, password);
-
+  delay(500);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
-  randomSeed(micros());
+  randomSeed(micros() + 500);
 
   Serial.println("");
   Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  delay(1000);
-  Serial.println("Running...");
+  delay(500);
 }
 
 void publishdata(char* topic, char* msg) {
@@ -94,12 +99,13 @@ void publishdata(char* topic, char* msg) {
   Serial.print("Publish message to ");
   Serial.print(topic);
   Serial.print(" : ");
-  Serial.println(msg);
+  Serial.print(msg);
   client.publish(topic, msg_buf, 3 + strlen(msg), false); // msg_buf as payload length which may have a "0x00"byte
-  Serial.println("- - - - - OK.");
+  Serial.println(" ...OK");
 }
 
 void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.println("");
   Serial.print("Message arrived [");
   Serial.print(topic);
   Serial.print("] ");
@@ -161,8 +167,9 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-     if (client.connect("device id", "product id", "key")) {
+    if (client.connect(deviceid, productid, apikey)) {
       Serial.println("connected");
+      reconnectWaitSec = 5;
       // ... and resubscribe
       //client.subscribe("DevCtrl");
     } else {
@@ -173,29 +180,56 @@ void reconnect() {
       Serial.println(" seconds ");
       // Wait 5 seconds before retrying
       delay(reconnectWaitSec * 1000);
-      if (reconnectWaitSec < 600) {
+      if (reconnectWaitSec < maxreconnectwaittime) {
         reconnectWaitSec += 5;
       }
     }
   }
 }
 
+void uploadstatus() {
+  if (value_io0 == 0) {
+    msgJson[7] = '0';
+  } else
+  {
+    msgJson[7] = '1';
+  }
+  if (value_io2 == 0) {
+    msgJson[15] = '0';
+  } else
+  {
+    msgJson[15] = '1';
+  }
+  publishdata("$dp", msgJson);
+}
+
 void setup() {
   Serial.begin(115200);
+  pinMode(IO0_PIN, OUTPUT);
+  pinMode(IO2_PIN, OUTPUT);
+  delay(10);
+  digitalWrite(IO0_PIN, LOW);
+  digitalWrite(IO2_PIN, LOW);
+  delay(100);
   setup_wifi();
-  client.setServer(mqtt_server, 6002);  //not 1883 , one net use the port of 6002 as mqtt server
+  client.setServer(mqtt_server, mqtt_port);
+  delay(500);
   client.setCallback(callback);
+  delay(500);
+  Serial.println("Running...");
 }
 
 void loop() {
 
   if (!client.connected()) {
     reconnect();
+    uploadstatus();
+    lastMsg = millis();
   }
   client.loop();
 
   long now = millis();
-  if (needfeedback || now - lastMsg > 5000) {
+  if (needfeedback || now - lastMsg > uploadinterval) {
     if (needfeedback) {
       needfeedback = false;
       _lastCreq[3] = 's';
@@ -205,21 +239,12 @@ void loop() {
       Serial.print(" : ");
       Serial.print(ack_buf);
       client.publish(_lastCreq, ack_buf, 1, false);
-      Serial.println("   ...OK.");
+      Serial.println("   ...OK");
     }
     lastMsg = now;
-    if (value_io0 == 0) {
-      msgJson[7] = '0';
-    } else
-    {
-      msgJson[7] = '1';
-    }
-    if (value_io2 == 0) {
-      msgJson[15] = '0';
-    } else
-    {
-      msgJson[15] = '1';
-    }
-    publishdata("$dp", msgJson);
+    uploadstatus();
+  } else if (now - lastDot > 3000) {
+    Serial.print('.');
+    lastDot = now;
   }
 }
